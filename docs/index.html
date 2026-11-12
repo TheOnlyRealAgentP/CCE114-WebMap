@@ -300,22 +300,35 @@ function fillPaint() {
 }
 
 // ---- layers (re-added after every basemap change) ---------------
-function addLayers() {
-  // Guard: style.load and the fetch can both reach here; adding twice throws.
-  if (!geo || !states || map.getLayer("huc8-fill")) return;
-  const t = theme();
+// States and basins draw independently: the states file is tiny and the basin
+// file is ~0.9 MB, so waiting for both would leave the map bare for seconds on
+// a slow connection. Each function is idempotent and safe to call repeatedly.
 
+function addStatesLayer() {
+  if (!states || !styleReady || map.getLayer("states-line")) return;
   if (!map.getSource("states")) {
     map.addSource("states", { type: "geojson", data: states });
   }
+  map.addLayer({
+    id: "states-line", type: "line", source: "states",
+    paint: {
+      "line-color": theme().state,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.9, 7, 1.8],
+      "line-opacity": 0.75
+    }
+  });
+}
+
+function addHuc8Layers() {
+  if (!geo || !styleReady || map.getLayer("huc8-fill")) return;
+  const t = theme();
   if (!map.getSource("huc8")) {
     map.addSource("huc8", { type: "geojson", data: geo, promoteId: "huc8" });
   }
+  // Keep basins beneath the state lines however the two arrive.
+  const under = map.getLayer("states-line") ? "states-line" : undefined;
 
-  map.addLayer({
-    id: "huc8-fill", type: "fill", source: "huc8",
-    paint: fillPaint()
-  });
+  map.addLayer({ id: "huc8-fill", type: "fill", source: "huc8", paint: fillPaint() }, under);
   map.addLayer({
     id: "huc8-line", type: "line", source: "huc8",
     paint: {
@@ -338,15 +351,16 @@ function addLayers() {
       ],
       "line-opacity": 0.9
     }
-  });
-  map.addLayer({
-    id: "states-line", type: "line", source: "states",
-    paint: { "line-color": t.state, "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.9, 7, 1.8], "line-opacity": 0.75 }
-  });
+  }, under);
 
   applyFilter();
-  applyToggles();
   restoreStates();
+}
+
+function addLayers() {
+  addStatesLayer();
+  addHuc8Layers();
+  applyToggles();
   renderLegend();
 }
 
@@ -441,6 +455,7 @@ map.on("mouseleave", "huc8-fill", () => {
 });
 
 map.on("click", (e) => {
+  if (!map.getLayer("huc8-fill")) return;   // basins may still be loading
   const hits = map.queryRenderedFeatures(e.point, { layers: ["huc8-fill"] });
   select(hits.length ? hits[0].id : null);
 });
@@ -559,25 +574,55 @@ document.getElementById("proj").addEventListener("click", (e) => {
 });
 
 // ---- load data once, then draw ------------------------------------
-// The fetch lives OUTSIDE the style handler on purpose: style.load fires again
-// on every basemap change, so fetching in there would re-download the file.
-const getJSON = (u) => fetch(u).then(r => {
-  if (!r.ok) throw new Error(`${u}: HTTP ${r.status}`);
-  return r.json();
-});
+// The fetches live OUTSIDE the style handler on purpose: style.load fires again
+// on every basemap change, so fetching in there would re-download the files.
+const loadingEl = () => document.getElementById("loading");
 
-Promise.all([getJSON("data/huc8.geojson"), getJSON("data/states.geojson")])
-  .then(([h, s]) => {
-    geo = h; states = s;
+function setLoading(msg) {
+  const el = loadingEl();
+  if (el) el.textContent = msg;
+}
+
+// Streams the response so the byte count can be reported. Content-Length is the
+// COMPRESSED size while the reader yields decompressed bytes, so show megabytes
+// read rather than a percentage that would sail past 100%.
+async function getJSON(url, label) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  if (!r.body) return r.json();
+  const reader = r.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    if (label) setLoading(`Loading ${label}\u2026 ${(got / 1048576).toFixed(1)} MB`);
+  }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return JSON.parse(new TextDecoder().decode(buf));
+}
+
+const fail = (err) => setLoading(`Could not load data: ${err.message}`);
+
+// States are small - draw them immediately so the map is useful at once.
+getJSON("data/states.geojson")
+  .then(s => { states = s; addStatesLayer(); applyToggles(); })
+  .catch(fail);
+
+getJSON("data/huc8.geojson", "watershed boundaries")
+  .then(h => {
+    geo = h;
     for (const f of h.features) byId.set(f.properties.huc8, f);
-    const el = document.getElementById("loading");
+    const el = loadingEl();
     if (el) el.remove();
-    if (styleReady) addLayers();   // whichever of the two finishes last draws
+    addHuc8Layers();
+    applyToggles();
   })
-  .catch(err => {
-    const el = document.getElementById("loading");
-    if (el) el.textContent = `Could not load watershed data: ${err.message}`;
-  });
+  .catch(fail);
 
 map.on("style.load", () => { styleReady = true; addLayers(); });
 renderLegend();
