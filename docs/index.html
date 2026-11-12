@@ -74,6 +74,9 @@ aside .panel { padding: 0; flex: none; }
 /* Legend */
 .narr { margin: 10px 0 0; color: var(--ink2); font-size: 12.5px; line-height: 1.5; }
 .src { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+#ainote .body p { margin: 0 0 9px; }
+#ainote code { font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--accent-wash); color: var(--ink2); padding: 1px 4px; border-radius: 3px; }
 #flood .name { font-size: 15px; font-weight: 650; color: var(--ink); line-height: 1.25; }
 #flood dl { margin: 10px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
 #flood dt { color: var(--muted); font-size: 12px; }
@@ -184,6 +187,34 @@ aside .panel { padding: 0; flex: none; }
         <p>Boundaries: <a href="https://www.usgs.gov/national-hydrography/watershed-boundary-dataset"
           target="_blank" rel="noopener">USGS WBD</a>, simplified for the web &mdash; use the source data
           for analysis, not these outlines. States: US Census TIGER (1:20m).</p>
+        <p>Built for <a href="https://byu-hydroinformatics.github.io/cce114-geomatics/assignments/web-mapping-with-ai/"
+          target="_blank" rel="noopener">CCE 114 &mdash; Web Mapping with AI</a>.</p>
+      </div>
+    </section>
+
+    <section class="panel" id="ainote">
+      <h3>AI note</h3>
+      <div class="body">
+        <p>I built this with Claude Code (Claude Opus 5) in VS Code, using MapLibre GL JS for the
+          map, mapshaper to simplify the geometry, and Playwright to drive a real browser while
+          testing. The data is from the USGS Watershed Boundary Dataset, Census TIGER, and the
+          NOAA NCEI Storm Events Database.</p>
+        <p>Three prompts did most of the work. The first asked for HUC8 and state boundaries with
+          a hover readout and a basemap switcher. The second asked for a 2026 flood points layer
+          where clicking a point shows the full storm record. The third was just
+          &ldquo;layers don&rsquo;t show up&rdquo; &mdash; which turned out to matter most.</p>
+        <p>The AI got the loading logic wrong. It gated drawing on MapLibre&rsquo;s
+          <code>isStyleLoaded()</code>, which reports false while the basemap&rsquo;s own sources
+          are still downloading, long after the style itself has loaded. On localhost the GeoJSON
+          arrived fast enough to hide it; published to GitHub Pages, the 0.9&nbsp;MB basin file
+          arrived second, found that false, and nothing ever drew. The map stayed blank until you
+          switched basemaps. We caught it by running the browser tests against the live URL instead
+          of localhost, and fixed it with an explicit ready flag set by the style-load event.</p>
+        <p>I checked the things I would not want to get wrong. One event reported 5 deaths and 5
+          injuries, which looked like a column-mapping bug, so I opened NOAA&rsquo;s source CSV and
+          confirmed the record really does say both. I also confirmed the flood data stops at
+          31 July 2026 because of NOAA&rsquo;s reporting lag, rather than assuming a full year, and
+          said so on the map instead of letting it look complete.</p>
       </div>
     </section>
   </aside>
