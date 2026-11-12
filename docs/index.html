@@ -72,6 +72,15 @@ aside .panel { padding: 0; flex: none; }
 #results .code { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 /* Legend */
+.narr { margin: 10px 0 0; color: var(--ink2); font-size: 12.5px; line-height: 1.5; }
+.src { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+#flood .name { font-size: 15px; font-weight: 650; color: var(--ink); line-height: 1.25; }
+#flood dl { margin: 10px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+#flood dt { color: var(--muted); font-size: 12px; }
+#flood dd { margin: 0; color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+#flood .pinned { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: var(--accent-wash); color: var(--accent); margin-top: 6px; }
+.dot { display: inline-block; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px var(--grid); }
 .legend-item { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
 /* Ring keeps pale swatches (e.g. the state line over imagery) visible
    against the panel without shifting the color they report. */
@@ -114,6 +123,13 @@ aside .panel { padding: 0; flex: none; }
       </div>
     </section>
 
+    <section class="panel" id="flood">
+      <h3>Flood event</h3>
+      <div class="body" id="flood-body">
+        <div class="placeholder">Click a red flood point for its full report.</div>
+      </div>
+    </section>
+
     <section class="panel">
       <h3>Find a basin</h3>
       <div class="body">
@@ -138,6 +154,13 @@ aside .panel { padding: 0; flex: none; }
         <label class="chk"><input type="checkbox" id="t-huc8" checked> Watershed boundaries</label>
         <label class="chk"><input type="checkbox" id="t-fill" checked> Basin fill</label>
         <label class="chk"><input type="checkbox" id="t-states" checked> State boundaries</label>
+        <label class="chk"><input type="checkbox" id="t-floods" checked> Flood events (2026)</label>
+        <label class="fld">Flood events shown
+          <div class="seg" id="floodsev">
+            <button type="button" data-sev="all" aria-pressed="true">All</button>
+            <button type="button" data-sev="major" aria-pressed="false">Major only</button>
+          </div>
+        </label>
       </div>
     </section>
 
@@ -150,7 +173,14 @@ aside .panel { padding: 0; flex: none; }
       <h3>About this map</h3>
       <div class="body">
         <p>HUC8 subbasins (Watershed Boundary Dataset) and US state boundaries, drawn over a
-          switchable basemap. Hover any basin for its name, code, area and states; click to pin it.</p>
+          switchable basemap. Hover any basin for its name, code, area and states; click to pin it.
+          Red points are 2026 flood events &mdash; click one for its full report.</p>
+        <p><strong>Flood coverage runs 1 Jan &ndash; 31 Jul 2026.</strong> NOAA publishes the Storm
+          Events Database on roughly a three-month lag, so later events are not in it yet. That
+          window holds 3,971 floods, 39 deaths and $1.4&nbsp;billion in damage.</p>
+        <p>Floods: <a href="https://www.ncei.noaa.gov/products/storm-events-database"
+          target="_blank" rel="noopener">NOAA NCEI Storm Events Database</a>. A point marks where the
+          event began; damage figures are the reporting office's estimate, not an audited loss.</p>
         <p>Boundaries: <a href="https://www.usgs.gov/national-hydrography/watershed-boundary-dataset"
           target="_blank" rel="noopener">USGS WBD</a>, simplified for the web &mdash; use the source data
           for analysis, not these outlines. States: US Census TIGER (1:20m).</p>
@@ -199,8 +229,10 @@ const BASEMAPS = {
 
 // Overlay colors, validated for colorblind separation against both surfaces.
 const MARK = {
-  light: { line: "#2a78d6", hover: "#eb6834", sel: "#1baf7a", state: "#52514e", nodata: "#b8b6ae" },
-  dark:  { line: "#3987e5", hover: "#d95926", sel: "#199e70", state: "#e8e6dd", nodata: "#6e6c66" }
+  light: { line: "#2a78d6", hover: "#eb6834", sel: "#1baf7a", state: "#52514e", nodata: "#b8b6ae",
+           flood: "#e34948", ring: "#fcfcfb" },
+  dark:  { line: "#3987e5", hover: "#d95926", sel: "#199e70", state: "#e8e6dd", nodata: "#6e6c66",
+           flood: "#e66767", ring: "#1a1a19" }
 };
 // Sequential ramp for basin area: low values sit nearest the surface in each mode.
 const RAMP = {
@@ -223,12 +255,13 @@ const REGIONS = {
 let basemapKey = "positron";
 let colorMode = "uniform";
 let regionFilter = "";
+let floodMajorOnly = false;
 let hoverId = null, selectedId = null;
 // Set by the style.load event. Do NOT use map.isStyleLoaded() for this:
 // it reports false while the basemap's sources are still loading, long
 // after style.load has fired, so a late-arriving fetch would never draw.
 let styleReady = false;
-let geo = null, states = null;   // cached FeatureCollections - fetched ONCE
+let geo = null, states = null, floods = null;   // cached FeatureCollections - fetched ONCE
 let byId = new Map();            // huc8 -> feature, for search and zoom-to
 
 const theme = () => MARK[BASEMAPS[basemapKey].dark ? "dark" : "light"];
@@ -304,6 +337,32 @@ function fillPaint() {
 // file is ~0.9 MB, so waiting for both would leave the map bare for seconds on
 // a slow connection. Each function is idempotent and safe to call repeatedly.
 
+function addFloodLayer() {
+  if (!floods || !styleReady || map.getLayer("floods-pt")) return;
+  const t = theme();
+  if (!map.getSource("floods")) {
+    map.addSource("floods", { type: "geojson", data: floods, promoteId: "id" });
+  }
+  map.addLayer({
+    id: "floods-pt", type: "circle", source: "floods",
+    paint: {
+      // Severity rides on size, not a second color: the points already own red.
+      "circle-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        3, ["match", ["get", "sev"], "major", 5, "moderate", 3, 2],
+        8, ["match", ["get", "sev"], "major", 11, "moderate", 7, 4.5]
+      ],
+      "circle-color": t.flood,
+      "circle-opacity": 0.82,
+      // A ring in the surface color keeps dense clusters countable.
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 3, 0.4, 8, 1.2],
+      "circle-stroke-color": t.ring,
+      "circle-stroke-opacity": 0.9
+    }
+  });
+  applyFloodFilter();
+}
+
 function addStatesLayer() {
   if (!states || !styleReady || map.getLayer("states-line")) return;
   if (!map.getSource("states")) {
@@ -316,7 +375,7 @@ function addStatesLayer() {
       "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.9, 7, 1.8],
       "line-opacity": 0.75
     }
-  });
+  }, map.getLayer("floods-pt") ? "floods-pt" : undefined);
 }
 
 function addHuc8Layers() {
@@ -325,8 +384,9 @@ function addHuc8Layers() {
   if (!map.getSource("huc8")) {
     map.addSource("huc8", { type: "geojson", data: geo, promoteId: "huc8" });
   }
-  // Keep basins beneath the state lines however the two arrive.
-  const under = map.getLayer("states-line") ? "states-line" : undefined;
+  // Keep basins beneath the state lines and flood points however they arrive.
+  const under = map.getLayer("states-line") ? "states-line"
+              : map.getLayer("floods-pt")  ? "floods-pt" : undefined;
 
   map.addLayer({ id: "huc8-fill", type: "fill", source: "huc8", paint: fillPaint() }, under);
   map.addLayer({
@@ -360,8 +420,14 @@ function addHuc8Layers() {
 function addLayers() {
   addStatesLayer();
   addHuc8Layers();
+  addFloodLayer();
   applyToggles();
   renderLegend();
+}
+
+function applyFloodFilter() {
+  if (!map.getLayer("floods-pt")) return;
+  map.setFilter("floods-pt", floodMajorOnly ? ["==", ["get", "sev"], "major"] : null);
 }
 
 // feature-state is cleared with the style, so re-apply what is current.
@@ -379,6 +445,7 @@ function applyToggles() {
   const on = (id, vis) => { if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis ? "visible" : "none"); };
   on("huc8-line", document.getElementById("t-huc8").checked);
   on("states-line", document.getElementById("t-states").checked);
+  on("floods-pt", document.getElementById("t-floods").checked);
   repaintFill();   // the fill stays visible (and hoverable) but goes transparent
 }
 
@@ -407,6 +474,50 @@ function showBasin(props, pinned) {
     ${pinned ? '<span class="pinned">Pinned &mdash; click the map to clear</span>' : ""}`;
 }
 
+function fmtMoney(v) {
+  if (!v) return "none reported";
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(2)} billion`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(1)} million`;
+  if (v >= 1e3) return `$${nf.format(Math.round(v / 1e3))},000`;
+  return `$${nf.format(v)}`;
+}
+
+// "14-JUN-26 18:30:00" -> "14 Jun 2026, 18:30"
+function fmtWhen(s) {
+  const m = /^(\d{2})-([A-Z]{3})-(\d{2}) (\d{2}):(\d{2})/.exec(s || "");
+  if (!m) return s || "\u2014";
+  const mon = m[2][0] + m[2].slice(1).toLowerCase();
+  return `${+m[1]} ${mon} 20${m[3]}, ${m[4]}:${m[5]}`;
+}
+
+function showFlood(p) {
+  const el = document.getElementById("flood-body");
+  if (!p) {
+    el.innerHTML = '<div class="placeholder">Click a red flood point for its full report.</div>';
+    return;
+  }
+  const where = [p.near, p.cz ? p.cz + " Co." : "", p.st].filter(Boolean).join(", ");
+  const rows = [
+    ["Type", esc(p.type)],
+    ["Began", `${esc(fmtWhen(p.beg))}${p.tz ? " " + esc(p.tz) : ""}`],
+    ["Ended", esc(fmtWhen(p.end))],
+    ["Where", esc(where)],
+    ["Deaths", p.d ? `<strong>${p.d}</strong>` : "0"],
+    ["Injuries", p.i ? `<strong>${p.i}</strong>` : "0"],
+    ["Damage", esc(fmtMoney(+p.dmg))],
+  ];
+  if (p.cause) rows.push(["Cause", esc(p.cause)]);
+  if (p.src)   rows.push(["Reported by", esc(p.src)]);
+
+  el.innerHTML = `
+    <div class="name">${esc(p.type)} \u2014 ${esc(p.st)}</div>
+    ${p.sev === "major" ? '<span class="pinned">Major event</span>' : ""}
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+    ${p.note ? `<p class="narr"><strong>What happened.</strong> ${esc(p.note)}</p>` : ""}
+    ${p.epi  ? `<p class="narr"><strong>Weather episode.</strong> ${esc(p.epi)}</p>` : ""}
+    <p class="src">NOAA Storm Events #${esc(p.id)}</p>`;
+}
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -423,14 +534,25 @@ function renderLegend() {
         <span>${nf.format(AREA_STOPS[AREA_STOPS.length - 1])}+ km&sup2;</span></div>
       <div class="legend-item" style="margin-top:8px">
         <span class="sw" style="background:${t.nodata}"></span>Area not reported</div>
-      <div class="legend-item"><span class="sw" style="background:${t.state}"></span>State boundary</div>`;
+      <div class="legend-item"><span class="sw" style="background:${t.state}"></span>State boundary</div>
+      ${floodLegend(t)}`;
   } else {
     el.innerHTML = `
       <div class="legend-item"><span class="sw" style="background:${t.line}"></span>HUC8 subbasin</div>
       <div class="legend-item"><span class="sw" style="background:${t.hover}"></span>Hovered</div>
       <div class="legend-item"><span class="sw" style="background:${t.sel}"></span>Pinned</div>
-      <div class="legend-item"><span class="sw" style="background:${t.state}"></span>State boundary</div>`;
+      <div class="legend-item"><span class="sw" style="background:${t.state}"></span>State boundary</div>
+      ${floodLegend(t)}`;
   }
+}
+
+function floodLegend(t) {
+  const dot = (px) => `<span class="dot" style="width:${px}px;height:${px}px;background:${t.flood}"></span>`;
+  return `
+    <div style="margin-top:10px">Flood events, Jan\u2013Jul 2026</div>
+    <div class="legend-item">${dot(13)}Major (death, injury or \u2265 $100k)</div>
+    <div class="legend-item">${dot(9)}Moderate (\u2265 $10k damage)</div>
+    <div class="legend-item">${dot(6)}Other reported flood</div>`;
 }
 
 // ---- interaction -------------------------------------------------
@@ -455,10 +577,23 @@ map.on("mouseleave", "huc8-fill", () => {
 });
 
 map.on("click", (e) => {
+  // Flood points are small, so accept a click within a few pixels of one and
+  // let them take priority over the basin underneath.
+  if (map.getLayer("floods-pt") &&
+      map.getLayoutProperty("floods-pt", "visibility") !== "none") {
+    const pad = 7;
+    const near = map.queryRenderedFeatures(
+      [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+      { layers: ["floods-pt"] });
+    if (near.length) { showFlood(near[0].properties); return; }
+  }
   if (!map.getLayer("huc8-fill")) return;   // basins may still be loading
   const hits = map.queryRenderedFeatures(e.point, { layers: ["huc8-fill"] });
   select(hits.length ? hits[0].id : null);
 });
+
+map.on("mouseenter", "floods-pt", () => { map.getCanvas().style.cursor = "pointer"; });
+map.on("mouseleave", "floods-pt", () => { map.getCanvas().style.cursor = ""; });
 
 function select(id) {
   if (selectedId) map.setFeatureState({ source: "huc8", id: selectedId }, { selected: false });
@@ -534,7 +669,16 @@ document.querySelectorAll("#colormode button").forEach(btn => {
   });
 });
 
-["t-huc8", "t-fill", "t-states"].forEach(id =>
+document.querySelectorAll("#floodsev button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    floodMajorOnly = btn.dataset.sev === "major";
+    document.querySelectorAll("#floodsev button").forEach(b =>
+      b.setAttribute("aria-pressed", String(b === btn)));
+    applyFloodFilter();
+  });
+});
+
+["t-huc8", "t-fill", "t-states", "t-floods"].forEach(id =>
   document.getElementById(id).addEventListener("change", applyToggles));
 
 // Search by name or HUC8 code
@@ -611,6 +755,11 @@ const fail = (err) => setLoading(`Could not load data: ${err.message}`);
 // States are small - draw them immediately so the map is useful at once.
 getJSON("data/states.geojson")
   .then(s => { states = s; addStatesLayer(); applyToggles(); })
+  .catch(fail);
+
+// Flood points are small and the headline layer - load them early.
+getJSON("data/floods.geojson")
+  .then(fc => { floods = fc; addFloodLayer(); applyToggles(); })
   .catch(fail);
 
 getJSON("data/huc8.geojson", "watershed boundaries")
