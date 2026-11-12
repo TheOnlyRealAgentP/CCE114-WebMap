@@ -224,6 +224,10 @@ let basemapKey = "positron";
 let colorMode = "uniform";
 let regionFilter = "";
 let hoverId = null, selectedId = null;
+// Set by the style.load event. Do NOT use map.isStyleLoaded() for this:
+// it reports false while the basemap's sources are still loading, long
+// after style.load has fired, so a late-arriving fetch would never draw.
+let styleReady = false;
 let geo = null, states = null;   // cached FeatureCollections - fetched ONCE
 let byId = new Map();            // huc8 -> feature, for search and zoom-to
 
@@ -487,6 +491,7 @@ for (const [k, b] of Object.entries(BASEMAPS)) {
 bmSel.value = basemapKey;
 bmSel.addEventListener("change", () => {
   basemapKey = bmSel.value;
+  styleReady = false;                   // until the new style reports in
   map.setStyle(styleFor(basemapKey));   // style.load re-runs addLayers()
 });
 
@@ -567,14 +572,14 @@ Promise.all([getJSON("data/huc8.geojson"), getJSON("data/states.geojson")])
     for (const f of h.features) byId.set(f.properties.huc8, f);
     const el = document.getElementById("loading");
     if (el) el.remove();
-    if (map.isStyleLoaded()) addLayers();
+    if (styleReady) addLayers();   // whichever of the two finishes last draws
   })
   .catch(err => {
     const el = document.getElementById("loading");
     if (el) el.textContent = `Could not load watershed data: ${err.message}`;
   });
 
-map.on("style.load", addLayers);
+map.on("style.load", () => { styleReady = true; addLayers(); });
 renderLegend();
 </script>
 </body>
